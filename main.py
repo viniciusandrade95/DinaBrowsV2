@@ -131,5 +131,3 @@ async def handle_whatsapp_webhook(request: Request):
 @app.get("/")
 def read_root():
     return {"status": "ok", "message": "API do Assistente Virtual está online."}
-
-# --- FIM DO FICHEIRO main.py ---

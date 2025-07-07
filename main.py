@@ -1,3 +1,6 @@
+# Ficheiro 1: main.py
+# Versão final com mapeamento dinâmico de tenants.
+
 import os
 import httpx
 import openai
@@ -23,44 +26,28 @@ load_dotenv()
 # --- Validação de Configuração ---
 class Config:
     """Centraliza toda a configuração da aplicação"""
-    # WhatsApp
     WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
-    PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
+    PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID") # ID do seu número de envio
     VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
-    
-    # AI
     TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
     AI_MODEL = os.getenv("AI_MODEL", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo")
-    
-    # Supabase
     SUPABASE_URL = os.getenv("SUPABASE_URL")
     SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-    
-    # Ambiente
     ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
-    TEST_TENANT_ID = os.getenv("TEST_TENANT_ID")  # Opcional
     
     @classmethod
     def validate(cls):
         """Valida se todas as configurações obrigatórias estão presentes"""
         required = {
-            "WHATSAPP_TOKEN": cls.WHATSAPP_TOKEN,
-            "PHONE_NUMBER_ID": cls.PHONE_NUMBER_ID,
-            "VERIFY_TOKEN": cls.VERIFY_TOKEN,
-            "TOGETHER_API_KEY": cls.TOGETHER_API_KEY,
-            "SUPABASE_URL": cls.SUPABASE_URL,
-            "SUPABASE_KEY": cls.SUPABASE_KEY
+            "WHATSAPP_TOKEN": cls.WHATSAPP_TOKEN, "PHONE_NUMBER_ID": cls.PHONE_NUMBER_ID,
+            "VERIFY_TOKEN": cls.VERIFY_TOKEN, "TOGETHER_API_KEY": cls.TOGETHER_API_KEY,
+            "SUPABASE_URL": cls.SUPABASE_URL, "SUPABASE_KEY": cls.SUPABASE_KEY
         }
-        
         missing = [key for key, value in required.items() if not value]
-        
         if missing:
             error_msg = f"Variáveis de ambiente obrigatórias faltando: {', '.join(missing)}"
             logger.critical(error_msg)
             raise RuntimeError(error_msg)
-        
-        if cls.ENVIRONMENT == "development" and not cls.TEST_TENANT_ID:
-            logger.warning("TEST_TENANT_ID não definido em ambiente de desenvolvimento")
 
 # Validar configuração
 Config.validate()
@@ -71,27 +58,14 @@ supabase: Client = create_client(Config.SUPABASE_URL, Config.SUPABASE_KEY)
 # --- App FastAPI com lifecycle management ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Gerencia o ciclo de vida da aplicação"""
     logger.info(f"Iniciando aplicação em modo {Config.ENVIRONMENT}")
     yield
     logger.info("Encerrando aplicação")
 
-app = FastAPI(
-    title="WhatsApp Bot API",
-    version="1.0.0",
-    lifespan=lifespan
-)
+app = FastAPI(title="WhatsApp Bot API", version="1.1.0", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-# Configurar CORS para produção
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Em produção, especifique os domínios permitidos
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# --- Classe do Bot Melhorada ---
+# --- Classes de Serviço e Bot ---
 class BrowStudioBot:
     def __init__(self, studio_info: Dict[str, Any], api_key: str):
         if not api_key:
@@ -105,7 +79,6 @@ class BrowStudioBot:
         self.system_prompt = self._build_system_prompt()
 
     def _build_system_prompt(self) -> str:
-        """Constrói o prompt do sistema com informações do estúdio"""
         services = self.studio_info.get('services', [])
         services_text = ""
         
@@ -129,15 +102,14 @@ SERVIÇOS OFERECIDOS:
 {services_text}
 
 INSTRUÇÕES:
-1. Responda APENAS em português brasileiro
-2. Seja simpática, profissional e prestativa
-3. Para agendamentos, direcione para o WhatsApp
-4. Se não souber algo, sugira contato direto
-5. Mantenha respostas concisas mas informativas
-6. Use emojis com moderação para tornar a conversa mais amigável"""
+1. Responda APENAS em português brasileiro.
+2. Seja simpática, profissional e prestativa.
+3. Para agendamentos, direcione para o WhatsApp.
+4. Se não souber algo, sugira contato direto.
+5. Mantenha respostas concisas mas informativas.
+6. Use emojis com moderação para tornar a conversa mais amigável."""
 
     async def get_response(self, user_message: str) -> str:
-        """Gera resposta usando a API de IA"""
         try:
             response = self.client.chat.completions.create(
                 model=Config.AI_MODEL,
@@ -156,11 +128,9 @@ INSTRUÇÕES:
                 f"Por favor, entre em contato diretamente: {self.studio_info.get('business_phone', 'nosso WhatsApp')}"
             )
 
-# --- Serviços do WhatsApp ---
 class WhatsAppService:
     @staticmethod
     async def send_message(to_number: str, message_text: str) -> bool:
-        """Envia mensagem via WhatsApp Business API"""
         url = f"https://graph.facebook.com/v18.0/{Config.PHONE_NUMBER_ID}/messages"
         headers = {
             "Authorization": f"Bearer {Config.WHATSAPP_TOKEN}",
@@ -189,11 +159,9 @@ class WhatsAppService:
             logger.error(f"Erro inesperado ao enviar mensagem: {e}")
             return False
 
-# --- Serviços do Supabase ---
 class DatabaseService:
     @staticmethod
     async def get_tenant_data(tenant_id: str) -> Optional[Dict[str, Any]]:
-        """Busca dados do tenant com tratamento de erros"""
         try:
             response = supabase.table("tenants").select("*, services(*)").eq("id", tenant_id).single().execute()
             return response.data
@@ -203,7 +171,6 @@ class DatabaseService:
     
     @staticmethod
     async def update_message_count(tenant_id: str, new_count: int) -> bool:
-        """Atualiza contador de mensagens"""
         try:
             supabase.table("tenants").update({
                 "message_count": new_count,
@@ -215,18 +182,12 @@ class DatabaseService:
             return False
     
     @staticmethod
-    async def save_message_history(
-        tenant_id: str,
-        phone_number: str,
-        user_message: str,
-        bot_response: str
-    ) -> bool:
-        """Salva histórico de mensagens"""
+    async def save_message_history(tenant_id: str, phone_number: str, user_message: str, bot_response: str) -> bool:
         try:
             supabase.table("message_history").insert({
                 "tenant_id": tenant_id,
                 "phone_number": phone_number,
-                "user_message": user_message[:1000],  # Limita tamanho
+                "user_message": user_message[:1000],
                 "bot_response": bot_response[:1000],
                 "created_at": datetime.utcnow().isoformat()
             }).execute()
@@ -235,37 +196,41 @@ class DatabaseService:
             logger.error(f"Erro ao salvar histórico: {str(e)}")
             return False
 
-# --- Função para mapear número para tenant ---
-async def get_tenant_id_from_message(message_data: Dict[str, Any]) -> Optional[str]:
-    """
-    Determina o tenant_id baseado na mensagem recebida.
-    Em produção, isso pode usar o número do destinatário ou outros metadados.
-    """
-    if Config.ENVIRONMENT == "development":
-        return Config.TEST_TENANT_ID
-    
-    # TODO: Implementar lógica de produção
-    # Exemplo: buscar na tabela phone_mappings
-    # phone_to = message_data.get("to")
-    # result = supabase.table("phone_mappings").select("tenant_id").eq("phone", phone_to).single().execute()
-    # return result.data.get("tenant_id") if result.data else None
-    
-    return None
+class TenantService:
+    @staticmethod
+    async def get_tenant_id_from_metadata(metadata: Dict[str, Any]) -> Optional[str]:
+        """
+        Determina o tenant_id baseado no número de telefone do destinatário.
+        """
+        try:
+            recipient_phone_number = metadata.get("display_phone_number")
+            if not recipient_phone_number:
+                logger.warning("Não foi possível encontrar 'display_phone_number' nos metadados.")
+                return None
+            
+            logger.info(f"Procurando tenant para o número: {recipient_phone_number}")
+            
+            # Consulta a nova tabela de mapeamento
+            response = supabase.table("phone_number_mappings").select("tenant_id").eq("whatsapp_phone_number", recipient_phone_number).single().execute()
+            
+            if response.data:
+                tenant_id = response.data.get("tenant_id")
+                logger.info(f"Tenant ID encontrado: {tenant_id}")
+                return tenant_id
+            else:
+                logger.error(f"Nenhum tenant encontrado para o número {recipient_phone_number}")
+                return None
+        except Exception as e:
+            logger.error(f"Erro ao buscar tenant_id por número de telefone: {e}", exc_info=True)
+            return None
 
 # --- Endpoints ---
 @app.get("/")
 async def root():
-    """Endpoint raiz com informações básicas"""
-    return {
-        "status": "online",
-        "service": "WhatsApp Bot API",
-        "version": "1.0.0",
-        "environment": Config.ENVIRONMENT
-    }
+    return {"status": "online", "service": "WhatsApp Bot API", "version": "1.1.0", "environment": Config.ENVIRONMENT}
 
 @app.get("/health")
 async def health_check():
-    """Verifica saúde da aplicação e dependências"""
     health_status = {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
@@ -276,7 +241,6 @@ async def health_check():
         }
     }
     
-    # Testa conexão com Supabase
     try:
         supabase.table("tenants").select("id").limit(1).execute()
         health_status["checks"]["database"] = True
@@ -287,7 +251,6 @@ async def health_check():
 
 @app.get("/webhook")
 async def verify_webhook(request: Request):
-    """Verifica o webhook do WhatsApp"""
     mode = request.query_params.get("hub.mode")
     token = request.query_params.get("hub.verify_token")
     challenge = request.query_params.get("hub.challenge")
@@ -301,107 +264,60 @@ async def verify_webhook(request: Request):
 
 @app.post("/webhook")
 async def handle_webhook(request: Request):
-    """Processa webhooks do WhatsApp"""
+    body = await request.json()
+    if Config.ENVIRONMENT == "development":
+        logger.debug(f"Webhook recebido: {body}")
+    
     try:
-        body = await request.json()
+        if body.get("object") != "whatsapp_business_account": return Response(status_code=200)
         
-        # Log apenas em desenvolvimento
-        if Config.ENVIRONMENT == "development":
-            logger.debug(f"Webhook recebido: {body}")
-        
-        # Validação inicial
-        if body.get("object") != "whatsapp_business_account":
-            return Response(status_code=200)
-        
-        # Extração segura dos dados
-        entry = body.get("entry", [])
-        if not entry:
-            return Response(status_code=200)
-        
-        changes = entry[0].get("changes", [])
-        if not changes:
-            return Response(status_code=200)
-        
-        value = changes[0].get("value", {})
+        value = body.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {})
+        metadata = value.get("metadata")
         messages = value.get("messages", [])
         
-        if not messages:
-            return Response(status_code=200)
+        if not metadata or not messages: return Response(status_code=200)
         
-        # Processa apenas a primeira mensagem
         message = messages[0]
-        message_id = message.get("id")
         from_number = message.get("from")
-        message_type = message.get("type")
-        
-        # Processa apenas mensagens de texto
-        if message_type != "text":
-            logger.info(f"Tipo de mensagem não suportado: {message_type}")
-            return Response(status_code=200)
-        
         message_text = message.get("text", {}).get("body", "").strip()
         
-        if not from_number or not message_text:
-            return Response(status_code=200)
+        if not from_number or not message_text: return Response(status_code=200)
         
-        # Obtém o tenant_id
-        tenant_id = await get_tenant_id_from_message(value)
+        # 1. Obtém o tenant_id dinamicamente
+        tenant_id = await TenantService.get_tenant_id_from_metadata(metadata)
         
         if not tenant_id:
-            logger.error("Não foi possível determinar o tenant_id")
-            await WhatsAppService.send_message(
-                from_number,
-                "Desculpe, não consegui identificar sua empresa. Por favor, verifique o número."
-            )
+            logger.error(f"Não foi possível determinar o tenant para a mensagem de {from_number}")
             return Response(status_code=200)
         
-        # Busca dados do tenant
+        # 2. Busca dados do tenant
         tenant_data = await DatabaseService.get_tenant_data(tenant_id)
-        
         if not tenant_data:
-            logger.error(f"Tenant {tenant_id} não encontrado")
+            logger.error(f"Tenant {tenant_id} não encontrado na base de dados.")
             return Response(status_code=200)
         
-        # Verifica limites
-        message_count = tenant_data.get("message_count", 0)
-        message_limit = tenant_data.get("message_limit", 100)
-        
-        if message_count >= message_limit:
+        # 3. Verifica limites
+        if tenant_data.get("message_count", 0) >= tenant_data.get("message_limit", 0):
             logger.warning(f"Limite atingido para {tenant_data.get('business_name')}")
-            await WhatsAppService.send_message(
-                from_number,
-                "Olá! 👋 Nosso atendimento automático atingiu o limite diário.\n"
-                "Um de nossos atendentes irá responder em breve. Obrigado! 🙏"
-            )
+            await WhatsAppService.send_message(from_number, "Olá! 👋 Nosso atendimento automático atingiu o limite diário. Um de nossos atendentes irá responder em breve. Obrigado! 🙏")
             return Response(status_code=200)
         
-        # Gera e envia resposta
+        # 4. Gera e envia resposta
         bot = BrowStudioBot(studio_info=tenant_data, api_key=Config.TOGETHER_API_KEY)
         reply_text = await bot.get_response(message_text)
-        
         success = await WhatsAppService.send_message(from_number, reply_text)
         
+        # 5. Atualiza contador e histórico se o envio for bem-sucedido
         if success:
-            # Atualiza contador
-            await DatabaseService.update_message_count(tenant_id, message_count + 1)
-            
-            # Salva histórico
-            await DatabaseService.save_message_history(
-                tenant_id, from_number, message_text, reply_text
-            )
+            await DatabaseService.update_message_count(tenant_id, tenant_data.get("message_count", 0) + 1)
+            await DatabaseService.save_message_history(tenant_id, from_number, message_text, reply_text)
         
     except Exception as e:
         logger.error(f"Erro crítico no webhook: {str(e)}", exc_info=True)
     
-    # Sempre retorna 200 para evitar retry do WhatsApp
     return Response(status_code=200)
 
-# --- Tratamento de erros global ---
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    """Captura erros não tratados"""
     logger.error(f"Erro não tratado: {str(exc)}", exc_info=True)
-    return Response(
-        content={"error": "Erro interno do servidor"},
-        status_code=500
-    )
+    return Response(content="Erro interno do servidor", status_code=500)

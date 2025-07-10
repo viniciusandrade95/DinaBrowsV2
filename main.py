@@ -1,5 +1,5 @@
-# Ficheiro: main.py
-# Versão com gestão de clientes e mapeamento dinâmico de tenants.
+# Ficheiro 1: main.py
+# Versão final com mapeamento dinâmico de tenants.
 
 import os
 import httpx
@@ -62,7 +62,7 @@ async def lifespan(app: FastAPI):
     yield
     logger.info("Encerrando aplicação")
 
-app = FastAPI(title="WhatsApp Bot API", version="1.2.0", lifespan=lifespan)
+app = FastAPI(title="WhatsApp Bot API", version="1.1.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 # --- Classes de Serviço e Bot ---
@@ -170,37 +170,6 @@ class DatabaseService:
             return None
     
     @staticmethod
-    async def get_or_create_customer(tenant_id: str, phone_number: str, user_name: Optional[str] = None) -> Optional[str]:
-        """Busca um cliente pelo número de telefone. Se não existir, cria um novo com o nome do perfil."""
-        try:
-            # Tenta encontrar o cliente
-            response = supabase.table("customers").select("id").eq("tenant_id", tenant_id).eq("phone_number", phone_number).single().execute()
-            
-            if response.data:
-                logger.info(f"Cliente encontrado com o ID: {response.data.get('id')} para o número {phone_number[:6]}****")
-                return response.data.get("id")
-            
-            # Se não encontrou, cria um novo
-            customer_name = user_name if user_name else f"Novo Cliente {phone_number[-4:]}"
-            logger.info(f"Nenhum cliente encontrado para {phone_number[:6]}****. A criar novo registo com o nome: {customer_name}")
-            
-            insert_response = supabase.table("customers").insert({
-                "tenant_id": tenant_id,
-                "phone_number": phone_number,
-                "name": customer_name
-            }).select("id").single().execute()
-
-            if insert_response.data:
-                customer_id = insert_response.data.get("id")
-                logger.info(f"Novo cliente criado com ID: {customer_id}")
-                return customer_id
-            
-            return None
-        except Exception as e:
-            logger.error(f"Erro ao buscar ou criar cliente para o número {phone_number[:6]}****: {e}")
-            return None
-
-    @staticmethod
     async def update_message_count(tenant_id: str, new_count: int) -> bool:
         try:
             supabase.table("tenants").update({
@@ -213,15 +182,14 @@ class DatabaseService:
             return False
     
     @staticmethod
-    async def save_message_history(tenant_id: str, customer_id: str, phone_number: str, user_message: str, bot_response: str) -> bool:
-        """Salva o histórico da mensagem, associando-a a um cliente."""
+    async def save_message_history(tenant_id: str, phone_number: str, user_message: str, bot_response: str) -> bool:
         try:
             supabase.table("message_history").insert({
                 "tenant_id": tenant_id,
-                "customer_id": customer_id,
                 "phone_number": phone_number,
                 "user_message": user_message[:1000],
                 "bot_response": bot_response[:1000],
+                "created_at": datetime.utcnow().isoformat()
             }).execute()
             return True
         except Exception as e:
@@ -231,7 +199,9 @@ class DatabaseService:
 class TenantService:
     @staticmethod
     async def get_tenant_id_from_metadata(metadata: Dict[str, Any]) -> Optional[str]:
-        """Determina o tenant_id baseado no número de telefone do destinatário."""
+        """
+        Determina o tenant_id baseado no número de telefone do destinatário.
+        """
         try:
             recipient_phone_number = metadata.get("display_phone_number")
             if not recipient_phone_number:
@@ -240,6 +210,7 @@ class TenantService:
             
             logger.info(f"Procurando tenant para o número: {recipient_phone_number}")
             
+            # Consulta a nova tabela de mapeamento
             response = supabase.table("phone_number_mappings").select("tenant_id").eq("whatsapp_phone_number", recipient_phone_number).single().execute()
             
             if response.data:
@@ -256,7 +227,7 @@ class TenantService:
 # --- Endpoints ---
 @app.get("/")
 async def root():
-    return {"status": "online", "service": "WhatsApp Bot API", "version": "1.2.0", "environment": Config.ENVIRONMENT}
+    return {"status": "online", "service": "WhatsApp Bot API", "version": "1.1.0", "environment": Config.ENVIRONMENT}
 
 @app.get("/health")
 async def health_check():
@@ -303,14 +274,12 @@ async def handle_webhook(request: Request):
         value = body.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {})
         metadata = value.get("metadata")
         messages = value.get("messages", [])
-        contacts = value.get("contacts", [{}])
         
         if not metadata or not messages: return Response(status_code=200)
         
         message = messages[0]
         from_number = message.get("from")
         message_text = message.get("text", {}).get("body", "").strip()
-        user_profile_name = contacts[0].get("profile", {}).get("name") if contacts else None
         
         if not from_number or not message_text: return Response(status_code=200)
         
@@ -328,30 +297,21 @@ async def handle_webhook(request: Request):
             return Response(status_code=200)
         
         # 3. Verifica limites
-        if tenant_data.get("message_count", 0) >= tenant_data.get("message_limit", 5000):
+        if tenant_data.get("message_count", 0) >= tenant_data.get("message_limit", 0):
             logger.warning(f"Limite atingido para {tenant_data.get('business_name')}")
             await WhatsAppService.send_message(from_number, "Olá! 👋 Nosso atendimento automático atingiu o limite diário. Um de nossos atendentes irá responder em breve. Obrigado! 🙏")
             return Response(status_code=200)
-            
-        # 4. Obtém ou cria o cliente
-        customer_id = await DatabaseService.get_or_create_customer(tenant_id, from_number, user_profile_name)
-        if not customer_id:
-            logger.error(f"Não foi possível obter ou criar um cliente para o número {from_number}")
-            pass
-
-        # 5. Gera e envia resposta
+        
+        # 4. Gera e envia resposta
         bot = BrowStudioBot(studio_info=tenant_data, api_key=Config.TOGETHER_API_KEY)
         reply_text = await bot.get_response(message_text)
         success = await WhatsAppService.send_message(from_number, reply_text)
         
-        # 6. Atualiza contador e histórico se o envio for bem-sucedido
+        # 5. Atualiza contador e histórico se o envio for bem-sucedido
         if success:
             await DatabaseService.update_message_count(tenant_id, tenant_data.get("message_count", 0) + 1)
-            if customer_id:
-                await DatabaseService.save_message_history(tenant_id, customer_id, from_number, message_text, reply_text)
-            else:
-                logger.warning("Histórico não foi salvo pois não há customer_id.")
-
+            await DatabaseService.save_message_history(tenant_id, from_number, message_text, reply_text)
+        
     except Exception as e:
         logger.error(f"Erro crítico no webhook: {str(e)}", exc_info=True)
     
